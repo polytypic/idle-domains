@@ -1,0 +1,15 @@
+#!/bin/bash
+
+set -eo pipefail
+
+export PROJECT=idle-domains
+export DOCS=_build/default/_doc/_html/
+export GIT=git@github.com:polytypic/$PROJECT.git
+
+folded() {
+  echo
+  echo "JOB: $1"
+  shift
+  local TIMEFORMAT="CPU: %Us, Real: %Es"
+  time "$@"
+}

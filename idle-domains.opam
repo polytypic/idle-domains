@@ -1,0 +1,16 @@
+opam-version: "2.0"
+version: "1.0.0"
+synopsis: "Co-operative allocation of domains for OCaml"
+maintainer: "Vesa Karvonen <vesa.a.j.k@gmail.com>"
+authors: "Vesa Karvonen"
+license: "0BSD"
+homepage: "https://github.com/polytypic/idle-domains"
+bug-reports: "https://github.com/polytypic/idle-domains/issues"
+dev-repo: "git+https://github.com/polytypic/idle-domains.git"
+depends: [
+  "dune" {>= "3.3.0"}
+  "ocaml" {>= "5.0.0"}
+  "multicore-magic" {>= "1.0.0" & < "2~"}
+  "odoc" {>= "2.1.1" & with-doc}
+]
+build: ["dune" "build" "-p" name "-j" jobs]

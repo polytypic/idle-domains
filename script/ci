@@ -1,0 +1,49 @@
+#!/bin/bash
+
+. "${BASH_SOURCE%/*}/common"
+
+main() {
+  if [ "$CI" = true ]; then
+    PROFILE='' build-and-test
+    clean
+  fi
+  PROFILE=release build-and-test
+  build-docs
+  check-git-clean
+}
+
+build-and-test() {
+  OPTS=(--root=.)
+
+  if [ -n "$PROFILE" ]; then
+     OPTS+=(--profile "$PROFILE")
+  fi
+
+  folded "Building" \
+    opam exec -- dune build "${OPTS[@]}"
+
+  folded "Testing" \
+    opam exec -- dune test "${OPTS[@]}"
+}
+
+clean() {
+  folded "Cleaning" \
+    opam exec -- dune clean
+}
+
+build-docs() {
+  folded "Build docs" \
+    opam exec -- dune build @doc --root=.
+}
+
+check-git-clean() {
+  if [ "$CI" = true ]; then
+    if [[ $(git status --porcelain) ]] ; then
+      git status
+      git diff
+      exit 1
+    fi
+  fi
+}
+
+main

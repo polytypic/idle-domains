@@ -1,0 +1,21 @@
+#!/bin/bash
+
+. "${BASH_SOURCE%/*}/common"
+
+tmux start-server
+tmux new-session -d -s $PROJECT
+
+tmux splitw -v -p 90
+tmux select-pane -t 0
+tmux splitw -h
+
+tmux select-pane -t 0
+tmux send-keys "npx livereload $DOCS --wait 250" C-m
+
+tmux select-pane -t 1
+tmux send-keys "npx serve $DOCS" C-m
+
+tmux select-pane -t 2
+tmux send-keys "script/watch-test" C-m
+
+tmux attach-session -t $PROJECT

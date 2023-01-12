@@ -1,0 +1,3 @@
+(tests
+ (names Idle_domains_test)
+ (libraries Idle_domains))

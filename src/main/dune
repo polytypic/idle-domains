@@ -1,0 +1,4 @@
+(library
+ (name Idle_domains)
+ (public_name idle-domains)
+ (libraries multicore-magic))
