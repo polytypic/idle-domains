@@ -128,8 +128,8 @@ let spawn ~scheduler md =
   end
   else begin
     md.scheduler <- scheduler;
-    Condition.signal md.condition;
     Mutex.unlock md.mutex;
+    Condition.signal md.condition;
     true
   end
   [@@inline]
