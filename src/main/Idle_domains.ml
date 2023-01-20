@@ -132,17 +132,19 @@ let spawn ~scheduler md =
     Mutex.unlock md.mutex;
     true
   end
+  [@@inline]
+
+let try_spawn ~scheduler top idx =
+  let md = Array.unsafe_get !managed_domains idx in
+  Atomic.compare_and_set top_idle top
+    (make_tagged_idx ~expected:top ~target:md.next_idx)
+  && spawn ~scheduler md
   [@@inline never]
 
 let try_spawn ~scheduler =
   let top = Multicore_magic.fenceless_get top_idle in
   let idx = target_of top in
-  idx != none_idx
-  &&
-  let md = Array.unsafe_get !managed_domains idx in
-  Atomic.compare_and_set top_idle top
-    (make_tagged_idx ~expected:top ~target:md.next_idx)
-  && spawn ~scheduler md
+  idx != none_idx && try_spawn ~scheduler top idx
   [@@inline]
 
 let wakeup (id : managed_id) =
