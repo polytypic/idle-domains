@@ -51,6 +51,8 @@ let next_sibling =
   Multicore_magic.copy_as_padded
     (ref (Multicore_magic.make_padded_array max_domains main_id))
 
+let terminated = Multicore_magic.copy_as_padded (ref false)
+
 let set ar i x =
   let n = Multicore_magic.length_of_padded_array !ar in
   if n <= i then begin
@@ -91,15 +93,17 @@ let rec run_managed md =
 
 and wait_managed md =
   let scheduler = md.scheduler in
-  if scheduler == null () then begin
+  if scheduler == null () && not !terminated then begin
     Condition.wait md.condition md.mutex;
     wait_managed md
   end
   else begin
-    md.scheduler <- null ();
     Mutex.unlock md.mutex;
-    scheduler md.id;
-    run_managed md
+    if scheduler != null () then begin
+      md.scheduler <- null ();
+      scheduler md.id
+    end;
+    if not !terminated then run_managed md
   end
 
 let managed_domain id =
@@ -121,17 +125,11 @@ let rec all ids id =
 let all () = all [] (next main_id)
 
 let spawn ~scheduler md =
+  md.scheduler <- scheduler;
   Mutex.lock md.mutex;
-  if md.scheduler != null () then begin
-    Mutex.unlock md.mutex;
-    false
-  end
-  else begin
-    md.scheduler <- scheduler;
-    Mutex.unlock md.mutex;
-    Condition.signal md.condition;
-    true
-  end
+  Mutex.unlock md.mutex;
+  Condition.signal md.condition;
+  true
   [@@inline]
 
 let try_spawn ~scheduler top idx =
@@ -150,10 +148,7 @@ let try_spawn ~scheduler =
 let wakeup (id : managed_id) =
   let md = Array.unsafe_get !managed_domains (id :> int) in
   Mutex.lock md.mutex;
-  if md.scheduler == null () then begin
-    md.scheduler <- ignore;
-    Condition.signal md.condition
-  end;
+  Condition.signal md.condition;
   Mutex.unlock md.mutex
 
 let rec run_idle ~until ready md =
@@ -178,9 +173,11 @@ and wait_idle ~until ready md =
     wait_idle ~until ready md
   end
   else begin
-    md.scheduler <- null ();
     Mutex.unlock md.mutex;
-    if scheduler != null () then scheduler md.id;
+    if scheduler != null () then begin
+      md.scheduler <- null ();
+      scheduler md.id
+    end;
     run_idle ~until ready md
   end
 
@@ -204,7 +201,6 @@ let idle ~until ready =
 exception Terminate
 
 let terminate _ = raise Terminate [@@inline never]
-let terminated = Multicore_magic.copy_as_padded (ref false)
 let check_terminate () = if !terminated then terminate () [@@inline]
 
 exception Managed_domains_raised of exn list
@@ -225,11 +221,7 @@ let terminate_at_exit () =
 
   let rec terminate_all id =
     if id != main_id then begin
-      let md = Array.unsafe_get !managed_domains (id :> int) in
-      Mutex.lock md.mutex;
-      md.scheduler <- terminate;
-      Condition.signal md.condition;
-      Mutex.unlock md.mutex;
+      wakeup id;
       terminate_all (next id)
     end
   in
@@ -240,7 +232,7 @@ let terminate_at_exit () =
     else
       let d = Array.unsafe_get !domains (id :> int) in
       match Domain.join d with
-      | () -> assert false
+      | () -> join_all exns (next id)
       | exception Terminate -> join_all exns (next id)
       | exception exn -> join_all (exn :: exns) (next id)
   in
