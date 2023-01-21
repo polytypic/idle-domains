@@ -120,23 +120,24 @@ val check_terminate : unit -> unit
 
 (** {3 Spawning schedulers} *)
 
-val try_spawn : scheduler:scheduler -> bool
-(** Tries to spawn the given {!scheduler} to run on a managed domain that
-    happens to be idle at the moment.  Returns [true] on success and [false] on
-    failure.
+type spawn
+(** A mutable request cell for {!spawn}ing {!scheduler}s. *)
 
-    The implementation of {!try_spawn} has been carefully optimized to make sure
-    that it can be called highly frequently.  No unbounded queues or other kinds
-    of dispensers are maintained by this library.  If there is contention or it
-    seems that there are no idle domains at the moment, {!try_spawn} will
-    immediately return [false].
+val spawn : unit -> spawn
+(** Creates a new {!spawn} request cell. *)
 
-    The intention is not that {!try_spawn} would be called in a loop until it
-    returns [true].  The intention is that libraries may call {!try_spawn} every
-    time they believe there is potentially work for an additional {!scheduler}.
+val is_in_progress : spawn -> bool
+(** Determines whether the {!spawn} request has been started and has not not
+    been cancelled or completed.
 
-    For best performance the caller likely wants to make sure that no closure
-    needs to be allocated for the {!scheduler}. *)
+    The implementation of {!is_in_progress} has been carefully optimized to make
+    sure that it can be called highly frequently. *)
+
+val start : spawn -> scheduler:scheduler -> unit
+(** Start a {!spawn} request for the specified {!scheduler}. *)
+
+val cancel : spawn -> unit
+(** Clears the {!spawn} request. *)
 
 (** {1 Application level interface}
 

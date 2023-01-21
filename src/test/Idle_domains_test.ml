@@ -21,7 +21,10 @@ let () =
     done
   in
 
-  while not (Idle_domains.try_spawn ~scheduler) do
+  let spawn = Idle_domains.spawn () in
+  Idle_domains.start spawn ~scheduler;
+
+  while Idle_domains.is_in_progress spawn do
     Domain.cpu_relax ()
   done;
 

@@ -33,9 +33,27 @@ type managed_domain = {
   mutex : Mutex.t;
   condition : Condition.t;
   id : managed_id;
-  mutable scheduler : scheduler;
   mutable next_idx : int;
 }
+
+type spawn = scheduler Atomic.t
+
+let spawns = Multicore_magic.copy_as_padded (Atomic.make [])
+
+let rec add spawn =
+  let top = Multicore_magic.fenceless_get spawns in
+  if not @@ Atomic.compare_and_set spawns top (spawn :: top) then add spawn
+
+let is_empty () = Multicore_magic.fenceless_get spawns == [] [@@inline]
+
+let rec try_remove () =
+  match Multicore_magic.fenceless_get spawns with
+  | [] -> null ()
+  | spawn :: rest as top ->
+    if not @@ Atomic.compare_and_set spawns top rest then try_remove ()
+    else
+      let scheduler = Atomic.exchange spawn (null ()) in
+      if scheduler == null () then try_remove () else scheduler
 
 let max_domains = Domain.recommended_domain_count ()
 
@@ -71,40 +89,63 @@ let tag_1 = 1 lsl idx_bits
 let tag_mask = -tag_1
 let idx_mask = tag_1 - 1
 let none_idx = -1 land idx_mask
-let top_idle = Multicore_magic.copy_as_padded (Atomic.make none_idx)
 let target_of tagged_idx = tagged_idx land idx_mask [@@inline]
 
 let make_tagged_idx ~expected ~target =
   (expected land tag_mask) + (target lor tag_1)
   [@@inline]
 
-let rec run_managed md =
-  let top = Multicore_magic.fenceless_get top_idle in
-  md.next_idx <- target_of top;
+let top_idle = Multicore_magic.copy_as_padded (Atomic.make none_idx)
+
+let alarm md =
+  Mutex.lock md.mutex;
+  Condition.signal md.condition;
+  Mutex.unlock md.mutex
+  [@@inline]
+
+let alarm top idx =
+  let md = Array.unsafe_get !managed_domains idx in
   if
-    not
-      (Atomic.compare_and_set top_idle top
-         (make_tagged_idx ~expected:top ~target:(md.id :> int)))
-  then run_managed md
-  else begin
-    Mutex.lock md.mutex;
-    wait_managed md
-  end
+    Atomic.compare_and_set top_idle top
+      (make_tagged_idx ~expected:top ~target:md.next_idx)
+  then alarm md
+
+let alarm () =
+  let top = Multicore_magic.fenceless_get top_idle in
+  let idx = target_of top in
+  if idx != none_idx then alarm top idx
+
+let rec run_managed md =
+  let scheduler = try_remove () in
+  if null () != scheduler then got_managed md scheduler
+  else
+    let top = Multicore_magic.fenceless_get top_idle in
+    md.next_idx <- target_of top;
+    if
+      not
+        (Atomic.compare_and_set top_idle top
+           (make_tagged_idx ~expected:top ~target:(md.id :> int)))
+    then run_managed md
+    else begin
+      Mutex.lock md.mutex;
+      wait_managed md
+    end
 
 and wait_managed md =
-  let scheduler = md.scheduler in
+  let scheduler = try_remove () in
   if scheduler == null () && not !terminated then begin
     Condition.wait md.condition md.mutex;
     wait_managed md
   end
   else begin
     Mutex.unlock md.mutex;
-    if scheduler != null () then begin
-      md.scheduler <- null ();
-      scheduler md.id
-    end;
-    if not !terminated then run_managed md
+    got_managed md scheduler
   end
+
+and got_managed md scheduler =
+  if not (is_empty ()) then alarm ();
+  if scheduler != null () then scheduler md.id;
+  if not !terminated then run_managed md
 
 let managed_domain id =
   Multicore_magic.copy_as_padded
@@ -112,7 +153,6 @@ let managed_domain id =
       mutex = Mutex.create ();
       condition = Condition.create ();
       id;
-      scheduler = null ();
       next_idx = none_idx;
     }
 
@@ -124,26 +164,22 @@ let rec all ids id =
 
 let all () = all [] (next main_id)
 
-let spawn ~scheduler md =
-  md.scheduler <- scheduler;
-  Mutex.lock md.mutex;
-  Mutex.unlock md.mutex;
-  Condition.signal md.condition;
-  true
+let is_in_progress spawn = Multicore_magic.fenceless_get spawn != null ()
   [@@inline]
 
-let try_spawn ~scheduler top idx =
-  let md = Array.unsafe_get !managed_domains idx in
-  Atomic.compare_and_set top_idle top
-    (make_tagged_idx ~expected:top ~target:md.next_idx)
-  && spawn ~scheduler md
-  [@@inline never]
+let spawn () = Multicore_magic.copy_as_padded @@ Atomic.make @@ null ()
 
-let try_spawn ~scheduler =
-  let top = Multicore_magic.fenceless_get top_idle in
-  let idx = target_of top in
-  idx != none_idx && try_spawn ~scheduler top idx
+let start spawn ~scheduler =
+  let was = Atomic.exchange spawn scheduler in
+  if was == null () then begin
+    add spawn;
+    alarm ()
+  end
   [@@inline]
+
+let cancel spawn =
+  let was = Multicore_magic.fenceless_get spawn in
+  if was != null () then Atomic.compare_and_set spawn was (null ()) |> ignore
 
 let wakeup (id : managed_id) =
   let md = Array.unsafe_get !managed_domains (id :> int) in
@@ -152,7 +188,9 @@ let wakeup (id : managed_id) =
   Mutex.unlock md.mutex
 
 let rec run_idle ~until ready md =
-  if not (until ready) then begin
+  let scheduler = try_remove () in
+  if null () != scheduler then got_idle ~until ready md scheduler
+  else if not (until ready) then begin
     let top = Multicore_magic.fenceless_get top_idle in
     md.next_idx <- target_of top;
     if
@@ -167,19 +205,20 @@ let rec run_idle ~until ready md =
   end
 
 and wait_idle ~until ready md =
-  let scheduler = md.scheduler in
+  let scheduler = try_remove () in
   if scheduler == null () && not (until ready) then begin
     Condition.wait md.condition md.mutex;
     wait_idle ~until ready md
   end
   else begin
     Mutex.unlock md.mutex;
-    if scheduler != null () then begin
-      md.scheduler <- null ();
-      scheduler md.id
-    end;
-    run_idle ~until ready md
+    got_idle ~until ready md scheduler
   end
+
+and got_idle ~until ready md scheduler =
+  if not (is_empty ()) then alarm ();
+  if scheduler != null () then scheduler md.id;
+  run_idle ~until ready md
 
 let is_managed (id : Domain.id) =
   let mds = !managed_domains in
