@@ -36,12 +36,7 @@
     scheduler and does not make use of any unbounded dispensers.  This framework
     merely manages the allocation of a finite number of domains. The goal is to
     provide a layer on top of which effective and efficient scheduler libraries
-    can be written.
-
-    The implementation of this framework is lock-free with the exception that
-    each domain has a mutex and a condition variable that are used by the domain
-    to wait for a signal to wake up.  This means that either domain involved in
-    a specific wake-up operation may be blocked. *)
+    can be written. *)
 
 (** {1 Library level interface}
 
@@ -120,24 +115,22 @@ val check_terminate : unit -> unit
 
 (** {3 Spawning schedulers} *)
 
-type spawn
-(** A mutable request cell for {!spawn}ing {!scheduler}s. *)
+type spawner
+(** A {!spawner} for a {!scheduler}s. *)
 
-val spawn : unit -> spawn
-(** Creates a new {!spawn} request cell. *)
+val spawner : unit -> spawner
+(** Creates a {!spawner}. *)
 
-val is_in_progress : spawn -> bool
-(** Determines whether the {!spawn} request has been started and has not not
-    been cancelled or completed.
+val register : spawner -> scheduler:scheduler -> unit
+(** Associates the {!spawner} with the specified {!scheduler} and adds it to the
+    internal registry of idle domains. *)
 
-    The implementation of {!is_in_progress} has been carefully optimized to make
-    sure that it can be called highly frequently. *)
+val unregister : spawner -> unit
+(** Removes the {!spawner} from the internal registry of idle domains. *)
 
-val start : spawn -> scheduler:scheduler -> unit
-(** Start a {!spawn} request for the specified {!scheduler}. *)
-
-val cancel : spawn -> unit
-(** Clears the {!spawn} request. *)
+val signal : spawner -> unit
+(** Signal that a new instance of the {!scheduler} associated with the
+    {!spawner} should ideally be spawned on an idle domain. *)
 
 (** {1 Application level interface}
 

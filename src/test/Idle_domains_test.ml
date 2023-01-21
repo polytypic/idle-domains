@@ -21,15 +21,11 @@ let () =
     done
   in
 
-  let spawn = Idle_domains.spawn () in
-  Idle_domains.start spawn ~scheduler;
-
-  while Idle_domains.is_in_progress spawn do
-    Domain.cpu_relax ()
-  done;
+  let spawner = Idle_domains.spawner () in
+  Idle_domains.register spawner ~scheduler;
 
   while Atomic.get scheduler_started = 0 do
-    Domain.cpu_relax ()
+    Idle_domains.signal spawner
   done;
 
   assert (Atomic.get scheduler_started = 1)
