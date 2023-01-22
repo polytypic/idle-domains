@@ -27,4 +27,8 @@ let () =
     Idle_domains.signal ()
   done;
 
-  Idle_domains.unregister ~scheduler
+  Idle_domains.unregister ~scheduler;
+
+  let self = Idle_domains.self () in
+  Idle_domains.wakeup ~self;
+  Idle_domains.idle ~self

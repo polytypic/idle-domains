@@ -13,17 +13,7 @@ let max_domains = Domain.recommended_domain_count ()
 let mutex = Mutex.create ()
 and condition = Condition.create ()
 
-let any_waiters = Multicore_magic.copy_as_padded (ref false)
-and num_waiters = Multicore_magic.copy_as_padded (ref 0)
-
-let wait () =
-  let n = !num_waiters + 1 in
-  num_waiters := n;
-  if n = 1 then any_waiters := true;
-  Condition.wait condition mutex;
-  let n = !num_waiters - 1 in
-  num_waiters := n;
-  if n = 0 then any_waiters := false
+let num_waiters = Multicore_magic.copy_as_padded (ref 0)
 
 let schedulers =
   Multicore_magic.copy_as_padded
@@ -52,25 +42,31 @@ let set ar i x =
   end;
   Array.unsafe_set !ar i x
 
-let rec run_managed mid =
-  if not !terminated then begin
-    let ss = Multicore_magic.fenceless_get schedulers in
-    let n = Multicore_magic.length_of_padded_array ss in
-    try_managed mid ss ~n 0
-  end
-
-and try_managed mid ss ~n i =
+let rec loop_managed mid ss ~n i =
   if i < n then begin
     let scheduler = Array.unsafe_get ss i in
     scheduler mid;
-    run_managed mid
+    loop_managed mid ss ~n (i + 1)
   end
   else begin
     Mutex.lock mutex;
-    if not !terminated then wait ();
+    let n = !num_waiters + 1 in
+    if ss == Multicore_magic.fenceless_get schedulers then begin
+      num_waiters := n;
+      Condition.wait condition mutex;
+      let n = !num_waiters in
+      num_waiters := n - 1
+    end;
+    let ss = Multicore_magic.fenceless_get schedulers in
+    let n = Multicore_magic.length_of_padded_array ss in
     Mutex.unlock mutex;
-    run_managed mid
+    loop_managed mid ss ~n 0
   end
+
+let run_managed mid =
+  let ss = Multicore_magic.fenceless_get schedulers in
+  let n = Multicore_magic.length_of_padded_array ss in
+  loop_managed mid ss ~n 0
 
 let next (id : managed_id) = Array.unsafe_get !next_sibling (id :> int)
   [@@inline]
@@ -103,37 +99,27 @@ let rec unregister ~scheduler =
         loop (ie + 1) (id + 1)
       end
       else loop (ie + 1) id
+    else assert (id + 1 = ie)
   in
   loop 0 0;
   if not (Atomic.compare_and_set schedulers expected desired) then
     unregister ~scheduler
 
-let signal spawner = if !any_waiters then Condition.signal condition [@@inline]
+let signal () = if 0 != !num_waiters then Condition.signal condition [@@inline]
 
-let wakeup (_id : managed_id) =
+exception Terminate
+
+let wakeup ~(self : managed_id) =
+  let rec scheduler mid =
+    if mid == self then begin
+      unregister ~scheduler;
+      raise Terminate
+    end
+  in
   Mutex.lock mutex;
+  register ~scheduler;
   Condition.broadcast condition;
   Mutex.unlock mutex
-
-let rec run_idle ~until ready mid =
-  if not (until ready) then begin
-    let ss = Multicore_magic.fenceless_get schedulers in
-    let n = Multicore_magic.length_of_padded_array ss in
-    try_idle ~until ready mid ss ~n 0
-  end
-
-and try_idle ~until ready mid ss ~n i =
-  if i < n then begin
-    let scheduler = Array.unsafe_get ss i in
-    scheduler mid;
-    run_idle ~until ready mid
-  end
-  else begin
-    Mutex.lock mutex;
-    if not (until ready) then wait ();
-    Mutex.unlock mutex;
-    run_idle ~until ready mid
-  end
 
 let is_managed (id : Domain.id) =
   id == main_id
@@ -147,12 +133,9 @@ let self () : managed_id =
   id
   [@@inline]
 
-let idle ~until ready =
-  let mid = Domain.self () in
-  assert (is_managed mid);
-  run_idle ~until ready mid
-
-exception Terminate
+let idle ~self =
+  assert (self == Domain.self ());
+  try run_managed self with Terminate -> ()
 
 let terminate _ = raise Terminate [@@inline never]
 let check_terminate () = if !terminated then terminate () [@@inline]
@@ -173,6 +156,7 @@ let terminate_at_exit () =
   terminated := true;
 
   Mutex.lock mutex;
+  register ~scheduler:terminate;
   Condition.broadcast condition;
   Mutex.unlock mutex;
 

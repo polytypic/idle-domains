@@ -69,22 +69,15 @@ val next : managed_id -> managed_id
 
 (** {2 Idling} *)
 
-val wakeup : managed_id -> unit
+val wakeup : self:managed_id -> unit
 (** Ensures that the specified managed domain is woken up.  This is for use with
     {!idle} to ensure that the predicate given to {!idle} is checked and {!idle}
     may return. *)
 
-val idle : until:('ready -> bool) -> 'ready -> unit
-(** Runs the current domain in a managed fashion [until] the given predicate
-    returns [true].  The caller must arrange for {!wakeup} to be called to
-    ensure that the predicate is checked to allow {!idle} to return.
-
-    The [until] predicate should ideally be as fast as possible, because it is
-    called repeatedly and it is also called during the period when a mutex is
-    locked before waiting on a condition variable for a signal to wake up.
-
-    During the {!idle} call any {!scheduler}s may be spawned to run on the
-    domain. *)
+val idle : self:managed_id -> unit
+(** Runs the current domain in a managed fashion until {!wakeup} is called to
+    make {!idle} return.  During the {!idle} call any {!scheduler}s may be
+    spawned to run on the domain. *)
 
 (** {2 Schedulers} *)
 
