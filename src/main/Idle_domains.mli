@@ -80,9 +80,8 @@ val idle : until:('ready -> bool) -> 'ready -> unit
     ensure that the predicate is checked to allow {!idle} to return.
 
     The [until] predicate should ideally be as fast as possible, because it is
-    called repeatedly and it is also called during the period when the mutex of
-    the domain is locked before waiting on the condition variable of the domain
-    for a signal to wake up.
+    called repeatedly and it is also called during the period when a mutex is
+    locked before waiting on a condition variable for a signal to wake up.
 
     During the {!idle} call any {!scheduler}s may be spawned to run on the
     domain. *)

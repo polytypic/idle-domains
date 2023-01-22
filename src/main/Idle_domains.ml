@@ -1,30 +1,5 @@
 [@@@alert "-unstable"]
 
-(* The implementation makes a number of important choices for performance.
-
-   First of all, the implementation makes use of `Multicore_magic` to pad data
-   structures and to perform fenceless get operations on atomics.  Both padding
-   and the use of fenceless get provide clear measurable performance
-   improvements.
-
-   Idle domains are pushed onto a Treiber stack.  Instead of using pointers, the
-   stack uses indices that refer to preallocated `managed_domain` records.  This
-   way operations on the stack require neither write barriers nor allocations.
-   The indices are tagged to avoid ABA problems.
-
-   You might be worried that a single shared Treiber stack does not scale.  The
-   reason why that is not a major problem is that we need to allow any domain to
-   quickly poll whether there are any idle domains.  The top of the Treiber
-   stack tells whether there are idle domains and it can be read quickly using a
-   fenceless get.
-
-   Each managed domain has its own mutex and condition variable.  This should
-   ensure that a wakeup operation does not block the other n-2 domains. *)
-
-let debug m =
-  Printf.printf "%s\n" m;
-  flush stdout
-
 let null () = Obj.magic ()
 
 type managed_id = Domain.id
@@ -33,24 +8,28 @@ let main_id = Domain.self ()
 
 type scheduler = managed_id -> unit
 
-type managed_domain = {
-  mutex : Mutex.t;
-  condition : Condition.t;
-  id : managed_id;
-  mutable next_idx : int;
-}
-
 let max_domains = Domain.recommended_domain_count ()
 
+let mutex = Mutex.create ()
+and condition = Condition.create ()
+
 type spawner = {mutable signal : bool; mutable scheduler : scheduler}
+
+let any_waiters = Multicore_magic.copy_as_padded (ref false)
+and num_waiters = Multicore_magic.copy_as_padded (ref 0)
+
+let wait () =
+  let n = !num_waiters + 1 in
+  num_waiters := n;
+  if n = 1 then any_waiters := true;
+  Condition.wait condition mutex;
+  let n = !num_waiters - 1 in
+  num_waiters := n;
+  if n = 0 then any_waiters := false
 
 let spawners =
   Multicore_magic.copy_as_padded
     (Atomic.make (Multicore_magic.make_padded_array 0 (null ())))
-
-let managed_domains =
-  Multicore_magic.copy_as_padded
-    (ref (Multicore_magic.make_padded_array max_domains (null ())))
 
 let domains =
   Multicore_magic.copy_as_padded
@@ -75,84 +54,28 @@ let set ar i x =
   end;
   Array.unsafe_set !ar i x
 
-let idx_bits = 16
-let tag_1 = 1 lsl idx_bits
-let tag_mask = -tag_1
-let idx_mask = tag_1 - 1
-let none_idx = -1 land idx_mask
-let target_of tagged_idx = tagged_idx land idx_mask [@@inline]
-
-let make_tagged_idx ~expected ~target =
-  (expected land tag_mask) + (target lor tag_1)
-  [@@inline]
-
-let top_idle = Multicore_magic.copy_as_padded (Atomic.make none_idx)
-
-let alarm md =
-  Mutex.lock md.mutex;
-  Condition.signal md.condition;
-  Mutex.unlock md.mutex
-  [@@inline]
-
-let alarm top idx =
-  let md = Array.unsafe_get !managed_domains idx in
-  if
-    Atomic.compare_and_set top_idle top
-      (make_tagged_idx ~expected:top ~target:md.next_idx)
-  then alarm md
-
-let alarm spawner =
-  spawner.signal <- true;
-  let top = Multicore_magic.fenceless_get top_idle in
-  let idx = target_of top in
-  if idx != none_idx then alarm top idx
-
-let rec run_managed md =
+let rec run_managed mid =
   if not !terminated then begin
     let ss = Multicore_magic.fenceless_get spawners in
     let n = Multicore_magic.length_of_padded_array ss in
-    try_managed md ss ~n 0
+    try_managed mid ss ~n 0
   end
 
-and try_managed md ss ~n i =
+and try_managed mid ss ~n i =
   if i < n then
     let spawner = Array.unsafe_get ss i in
-    if not spawner.signal then try_managed md ss ~n (i + 1)
-    else
-      let scheduler = spawner.scheduler in
-      if null () == scheduler then try_managed md ss ~n (i + 1)
-      else begin
-        spawner.signal <- false;
-        scheduler md.id;
-        run_managed md
-      end
-  else
-    let top = Multicore_magic.fenceless_get top_idle in
-    Mutex.lock md.mutex;
-    md.next_idx <- target_of top;
-    if
-      not
-        (Atomic.compare_and_set top_idle top
-           (make_tagged_idx ~expected:top ~target:(md.id :> int)))
-    then begin
-      Mutex.unlock md.mutex;
-      run_managed md
+    if not spawner.signal then try_managed mid ss ~n (i + 1)
+    else begin
+      spawner.signal <- false;
+      spawner.scheduler mid;
+      run_managed mid
     end
-    else wait_managed md
-
-and wait_managed md =
-  if not !terminated then Condition.wait md.condition md.mutex;
-  Mutex.unlock md.mutex;
-  run_managed md
-
-let managed_domain id =
-  Multicore_magic.copy_as_padded
-    {
-      mutex = Mutex.create ();
-      condition = Condition.create ();
-      id;
-      next_idx = none_idx;
-    }
+  else begin
+    Mutex.lock mutex;
+    if not !terminated then wait ();
+    Mutex.unlock mutex;
+    run_managed mid
+  end
 
 let next (id : managed_id) = Array.unsafe_get !next_sibling (id :> int)
   [@@inline]
@@ -163,7 +86,7 @@ let rec all ids id =
 let all () = all [] (next main_id)
 
 let spawner () =
-  Multicore_magic.copy_as_padded {signal = false; scheduler = null ()}
+  Multicore_magic.copy_as_padded {signal = false; scheduler = ignore}
 
 let rec register spawner ~scheduler =
   spawner.scheduler <- scheduler;
@@ -179,7 +102,7 @@ let rec register spawner ~scheduler =
 
 let rec unregister spawner =
   spawner.signal <- false;
-  spawner.scheduler <- null ();
+  spawner.scheduler <- ignore;
   let expected = Multicore_magic.fenceless_get spawners in
   let n = Multicore_magic.length_of_padded_array expected in
   let desired = Multicore_magic.make_padded_array (n - 1) (null ()) in
@@ -196,56 +119,44 @@ let rec unregister spawner =
   if not (Atomic.compare_and_set spawners expected desired) then
     unregister spawner
 
-let signal spawner = if not spawner.signal then alarm spawner [@@inline]
+let signal spawner =
+  if not spawner.signal then spawner.signal <- true;
+  if !any_waiters then Condition.signal condition
+  [@@inline]
 
-let wakeup (id : managed_id) =
-  let md = Array.unsafe_get !managed_domains (id :> int) in
-  Mutex.lock md.mutex;
-  Condition.signal md.condition;
-  Mutex.unlock md.mutex
+let wakeup (_id : managed_id) =
+  Mutex.lock mutex;
+  Condition.broadcast condition;
+  Mutex.unlock mutex
 
-let rec run_idle ~until ready md =
+let rec run_idle ~until ready mid =
   if not (until ready) then begin
     let ss = Multicore_magic.fenceless_get spawners in
     let n = Multicore_magic.length_of_padded_array ss in
-    try_idle ~until ready md ss ~n 0
+    try_idle ~until ready mid ss ~n 0
   end
 
-and try_idle ~until ready md ss ~n i =
+and try_idle ~until ready mid ss ~n i =
   if i < n then
     let spawner = Array.unsafe_get ss i in
-    if not spawner.signal then try_idle ~until ready md ss ~n (i + 1)
-    else
-      let scheduler = spawner.scheduler in
-      if null () == scheduler then try_idle ~until ready md ss ~n (i + 1)
-      else begin
-        spawner.signal <- false;
-        scheduler md.id;
-        run_idle ~until ready md
-      end
-  else
-    let top = Multicore_magic.fenceless_get top_idle in
-    Mutex.lock md.mutex;
-    md.next_idx <- target_of top;
-    if
-      not
-        (Atomic.compare_and_set top_idle top
-           (make_tagged_idx ~expected:top ~target:(md.id :> int)))
-    then begin
-      Mutex.unlock md.mutex;
-      run_idle ~until ready md
+    if not spawner.signal then try_idle ~until ready mid ss ~n (i + 1)
+    else begin
+      spawner.signal <- false;
+      spawner.scheduler mid;
+      run_idle ~until ready mid
     end
-    else wait_idle ~until ready md
-
-and wait_idle ~until ready md =
-  if not (until ready) then Condition.wait md.condition md.mutex;
-  Mutex.unlock md.mutex;
-  run_idle ~until ready md
+  else begin
+    Mutex.lock mutex;
+    if not (until ready) then wait ();
+    Mutex.unlock mutex;
+    run_idle ~until ready mid
+  end
 
 let is_managed (id : Domain.id) =
-  let mds = !managed_domains in
-  (id :> int) < Multicore_magic.length_of_padded_array mds
-  && Array.unsafe_get mds (id :> int) != null ()
+  id == main_id
+  ||
+  let ds = !domains in
+  (id :> int) < Array.length ds && Array.unsafe_get ds (id :> int) != null ()
 
 let self () : managed_id =
   let id = Domain.self () in
@@ -254,10 +165,9 @@ let self () : managed_id =
   [@@inline]
 
 let idle ~until ready =
-  let id = Domain.self () in
-  assert (is_managed id);
-  let md = Array.unsafe_get !managed_domains (id :> int) in
-  run_idle ~until ready md
+  let mid = Domain.self () in
+  assert (is_managed mid);
+  run_idle ~until ready mid
 
 exception Terminate
 
@@ -266,8 +176,7 @@ let check_terminate () = if !terminated then terminate () [@@inline]
 
 exception Managed_domains_raised of exn list
 
-let () =
-  Printexc.register_printer @@ function
+let printer_Managed_domains_raised = function
   | Managed_domains_raised exns ->
     let msg =
       "Managed_domains_raised ["
@@ -280,62 +189,56 @@ let () =
 let terminate_at_exit () =
   terminated := true;
 
-  let rec terminate_all id =
-    if id != main_id then begin
-      wakeup id;
-      terminate_all (next id)
-    end
-  in
-  terminate_all (next main_id);
+  Mutex.lock mutex;
+  Condition.broadcast condition;
+  Mutex.unlock mutex;
 
   let rec join_all exns id =
     if id == main_id then exns
     else
       let d = Array.unsafe_get !domains (id :> int) in
       match Domain.join d with
-      | () -> join_all exns (next id)
-      | exception Terminate -> join_all exns (next id)
+      | () | (exception Terminate) -> join_all exns (next id)
       | exception exn -> join_all (exn :: exns) (next id)
   in
   let exns = join_all [] (next main_id) in
 
   if exns != [] then raise @@ Managed_domains_raised exns
 
-let num_managed_domains = Atomic.make 0
+let num_managed_domains = ref 0
 
 let prepare ~num_domains =
-  let num_domains = Int.max 1 (Int.min num_domains max_domains) in
-  if Atomic.compare_and_set num_managed_domains 0 1 then begin
-    at_exit terminate_at_exit;
-    set managed_domains (main_id :> int) (managed_domain main_id);
-    let mutex = Mutex.create () and condition = Condition.create () in
+  if !num_managed_domains = 0 then begin
+    let num_domains = Int.max 1 (Int.min num_domains max_domains) in
     Mutex.lock mutex;
-    for _ = 2 to num_domains do
-      let domain =
-        Domain.spawn @@ fun () ->
-        let id = Domain.self () in
-        let md = managed_domain id in
-        Mutex.lock mutex;
-        set managed_domains (id :> int) md;
-        Atomic.incr num_managed_domains;
-        if Atomic.get num_managed_domains = num_domains then
-          Condition.broadcast condition;
-        while Atomic.get num_managed_domains <> num_domains do
-          Condition.wait condition mutex
-        done;
-        Mutex.unlock mutex;
-        run_managed md
-      in
-      let id = Domain.get_id domain in
-      assert ((id :> int) < idx_mask);
-      let next_id = Array.unsafe_get !next_sibling (main_id :> int) in
-      set next_sibling (id :> int) next_id;
-      set next_sibling (main_id :> int) id;
-      set domains (id :> int) domain
-    done;
-    while Atomic.get num_managed_domains <> num_domains do
-      Condition.wait condition mutex
-    done;
+    if !num_managed_domains = 0 then begin
+      Printexc.register_printer printer_Managed_domains_raised;
+      incr num_managed_domains;
+      at_exit terminate_at_exit;
+      for _ = 2 to num_domains do
+        let domain =
+          Domain.spawn @@ fun () ->
+          let mid = Domain.self () in
+          Mutex.lock mutex;
+          incr num_managed_domains;
+          if !num_managed_domains = num_domains then
+            Condition.broadcast condition;
+          while !num_managed_domains <> num_domains do
+            Condition.wait condition mutex
+          done;
+          Mutex.unlock mutex;
+          run_managed mid
+        in
+        let id = Domain.get_id domain in
+        let next_id = Array.unsafe_get !next_sibling (main_id :> int) in
+        set next_sibling (id :> int) next_id;
+        set next_sibling (main_id :> int) id;
+        set domains (id :> int) domain
+      done;
+      while !num_managed_domains <> num_domains do
+        Condition.wait condition mutex
+      done
+    end;
     Mutex.unlock mutex
   end
 
