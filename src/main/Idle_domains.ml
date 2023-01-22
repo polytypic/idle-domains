@@ -13,7 +13,7 @@ let max_domains = Domain.recommended_domain_count ()
 let mutex = Mutex.create ()
 and condition = Condition.create ()
 
-type spawner = {mutable signal : bool; mutable scheduler : scheduler}
+type spawner = {mutable scheduler : scheduler}
 
 let any_waiters = Multicore_magic.copy_as_padded (ref false)
 and num_waiters = Multicore_magic.copy_as_padded (ref 0)
@@ -62,14 +62,11 @@ let rec run_managed mid =
   end
 
 and try_managed mid ss ~n i =
-  if i < n then
+  if i < n then begin
     let spawner = Array.unsafe_get ss i in
-    if not spawner.signal then try_managed mid ss ~n (i + 1)
-    else begin
-      spawner.signal <- false;
-      spawner.scheduler mid;
-      run_managed mid
-    end
+    spawner.scheduler mid;
+    run_managed mid
+  end
   else begin
     Mutex.lock mutex;
     if not !terminated then wait ();
@@ -84,9 +81,7 @@ let rec all ids id =
   if id == main_id then main_id :: ids else all (id :: ids) (next id)
 
 let all () = all [] (next main_id)
-
-let spawner () =
-  Multicore_magic.copy_as_padded {signal = false; scheduler = ignore}
+let spawner () = Multicore_magic.copy_as_padded {scheduler = ignore}
 
 let rec register spawner ~scheduler =
   spawner.scheduler <- scheduler;
@@ -101,7 +96,6 @@ let rec register spawner ~scheduler =
     register spawner ~scheduler
 
 let rec unregister spawner =
-  spawner.signal <- false;
   spawner.scheduler <- ignore;
   let expected = Multicore_magic.fenceless_get spawners in
   let n = Multicore_magic.length_of_padded_array expected in
@@ -119,10 +113,7 @@ let rec unregister spawner =
   if not (Atomic.compare_and_set spawners expected desired) then
     unregister spawner
 
-let signal spawner =
-  if not spawner.signal then spawner.signal <- true;
-  if !any_waiters then Condition.signal condition
-  [@@inline]
+let signal spawner = if !any_waiters then Condition.signal condition [@@inline]
 
 let wakeup (_id : managed_id) =
   Mutex.lock mutex;
@@ -137,14 +128,11 @@ let rec run_idle ~until ready mid =
   end
 
 and try_idle ~until ready mid ss ~n i =
-  if i < n then
+  if i < n then begin
     let spawner = Array.unsafe_get ss i in
-    if not spawner.signal then try_idle ~until ready mid ss ~n (i + 1)
-    else begin
-      spawner.signal <- false;
-      spawner.scheduler mid;
-      run_idle ~until ready mid
-    end
+    spawner.scheduler mid;
+    run_idle ~until ready mid
+  end
   else begin
     Mutex.lock mutex;
     if not (until ready) then wait ();
