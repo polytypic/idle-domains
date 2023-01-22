@@ -114,22 +114,14 @@ val check_terminate : unit -> unit
 
 (** {3 Spawning schedulers} *)
 
-type spawner
-(** A {!spawner} for a {!scheduler}s. *)
+val register : scheduler:scheduler -> unit
+(** Adds the {!scheduler} to the internal registry of idle domains. *)
 
-val spawner : unit -> spawner
-(** Creates a {!spawner}. *)
+val unregister : scheduler:scheduler -> unit
+(** Removes the {!scheduler} from the internal registry of idle domains. *)
 
-val register : spawner -> scheduler:scheduler -> unit
-(** Associates the {!spawner} with the specified {!scheduler} and adds it to the
-    internal registry of idle domains. *)
-
-val unregister : spawner -> unit
-(** Removes the {!spawner} from the internal registry of idle domains. *)
-
-val signal : spawner -> unit
-(** Signal that a new instance of the {!scheduler} associated with the
-    {!spawner} should ideally be spawned on an idle domain. *)
+val signal : unit -> unit
+(** Signal that there might be new work for some {!scheduler} an idle domain. *)
 
 (** {1 Application level interface}
 

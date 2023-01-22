@@ -13,8 +13,6 @@ let max_domains = Domain.recommended_domain_count ()
 let mutex = Mutex.create ()
 and condition = Condition.create ()
 
-type spawner = {mutable scheduler : scheduler}
-
 let any_waiters = Multicore_magic.copy_as_padded (ref false)
 and num_waiters = Multicore_magic.copy_as_padded (ref 0)
 
@@ -27,7 +25,7 @@ let wait () =
   num_waiters := n;
   if n = 0 then any_waiters := false
 
-let spawners =
+let schedulers =
   Multicore_magic.copy_as_padded
     (Atomic.make (Multicore_magic.make_padded_array 0 (null ())))
 
@@ -56,15 +54,15 @@ let set ar i x =
 
 let rec run_managed mid =
   if not !terminated then begin
-    let ss = Multicore_magic.fenceless_get spawners in
+    let ss = Multicore_magic.fenceless_get schedulers in
     let n = Multicore_magic.length_of_padded_array ss in
     try_managed mid ss ~n 0
   end
 
 and try_managed mid ss ~n i =
   if i < n then begin
-    let spawner = Array.unsafe_get ss i in
-    spawner.scheduler mid;
+    let scheduler = Array.unsafe_get ss i in
+    scheduler mid;
     run_managed mid
   end
   else begin
@@ -81,37 +79,34 @@ let rec all ids id =
   if id == main_id then main_id :: ids else all (id :: ids) (next id)
 
 let all () = all [] (next main_id)
-let spawner () = Multicore_magic.copy_as_padded {scheduler = ignore}
 
-let rec register spawner ~scheduler =
-  spawner.scheduler <- scheduler;
-  let expected = Multicore_magic.fenceless_get spawners in
+let rec register ~scheduler =
+  let expected = Multicore_magic.fenceless_get schedulers in
   let n = Multicore_magic.length_of_padded_array expected in
   let desired = Multicore_magic.make_padded_array (n + 1) (null ()) in
   for i = 0 to n - 1 do
     Array.unsafe_set desired i (Array.unsafe_get expected i)
   done;
-  Array.unsafe_set desired n spawner;
-  if not (Atomic.compare_and_set spawners expected desired) then
-    register spawner ~scheduler
+  Array.unsafe_set desired n scheduler;
+  if not (Atomic.compare_and_set schedulers expected desired) then
+    register ~scheduler
 
-let rec unregister spawner =
-  spawner.scheduler <- ignore;
-  let expected = Multicore_magic.fenceless_get spawners in
+let rec unregister ~scheduler =
+  let expected = Multicore_magic.fenceless_get schedulers in
   let n = Multicore_magic.length_of_padded_array expected in
   let desired = Multicore_magic.make_padded_array (n - 1) (null ()) in
   let rec loop ie id =
     if ie < n then
       let s = Array.unsafe_get expected ie in
-      if s != spawner then begin
+      if s != scheduler then begin
         Array.unsafe_set desired id s;
         loop (ie + 1) (id + 1)
       end
       else loop (ie + 1) id
   in
   loop 0 0;
-  if not (Atomic.compare_and_set spawners expected desired) then
-    unregister spawner
+  if not (Atomic.compare_and_set schedulers expected desired) then
+    unregister ~scheduler
 
 let signal spawner = if !any_waiters then Condition.signal condition [@@inline]
 
@@ -122,15 +117,15 @@ let wakeup (_id : managed_id) =
 
 let rec run_idle ~until ready mid =
   if not (until ready) then begin
-    let ss = Multicore_magic.fenceless_get spawners in
+    let ss = Multicore_magic.fenceless_get schedulers in
     let n = Multicore_magic.length_of_padded_array ss in
     try_idle ~until ready mid ss ~n 0
   end
 
 and try_idle ~until ready mid ss ~n i =
   if i < n then begin
-    let spawner = Array.unsafe_get ss i in
-    spawner.scheduler mid;
+    let scheduler = Array.unsafe_get ss i in
+    scheduler mid;
     run_idle ~until ready mid
   end
   else begin
