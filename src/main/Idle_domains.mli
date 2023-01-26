@@ -52,9 +52,47 @@ type managed_id = private Domain.id
 (** A {!managed_id} is an alias for [Domain.id] used to indicate the subset of
     ids referring to managed domains. *)
 
+(** {2 Reflecting managed domains} *)
+
+val all : unit -> managed_id list
+(** Returns a list of all the managed domains.  This list also includes the main
+    domain as the first element.
+
+    The intended use case of {!all} is for libraries providing {!scheduler}s to
+    to perform per domain preparation once. *)
+
 val self : unit -> managed_id
-(** Alias for [Domain.self ()] to be called only from a managed domain.  The
-    main domain is considered to be a managed domain. *)
+(** An alias for [Domain.self ()] that asserts that is called from a managed
+    domain.  The main domain is considered to be a managed domain. *)
+
+val next : managed_id -> managed_id
+(** Returns the next sibling of the given managed domain.  The siblings form a
+    cycle and the main domain is included in the cycle.
+
+    An intended use case for {!next} is to iterate over managed domains e.g. to
+    implement work-stealing. *)
+
+(** {2 Idling} *)
+
+val wakeup : managed_id -> unit
+(** Ensures that the specified managed domain is woken up.  This is for use with
+    {!idle} to ensure that the predicate given to {!idle} is checked and {!idle}
+    may return. *)
+
+val idle : until:('ready -> bool) -> 'ready -> unit
+(** Runs the current domain in a managed fashion [until] the given predicate
+    returns [true].  The caller must arrange for {!wakeup} to be called to
+    ensure that the predicate is checked to allow {!idle} to return.
+
+    The [until] predicate should ideally be as fast as possible, because it is
+    called repeatedly and it is also called during the period when the mutex of
+    the domain is locked before waiting on the condition variable of the domain
+    for a signal to wake up.
+
+    During the {!idle} call any {!scheduler}s may be spawned to run on the
+    domain. *)
+
+(** {2 Schedulers} *)
 
 type scheduler = managed_id -> unit
 (** A {!scheduler} is just a function that executes on a specific domain.
@@ -80,6 +118,8 @@ val check_terminate : unit -> unit
     It is typically not necessary to call {!check_terminate} from a {!scheduler}
     that always returns as soon as it has no work to do. *)
 
+(** {3 Spawning schedulers} *)
+
 val try_spawn : scheduler:scheduler -> bool
 (** Tries to spawn the given {!scheduler} to run on a managed domain that
     happens to be idle at the moment.  Returns [true] on success and [false] on
@@ -97,32 +137,6 @@ val try_spawn : scheduler:scheduler -> bool
 
     For best performance the caller likely wants to make sure that no closure
     needs to be allocated for the {!scheduler}. *)
-
-val wakeup : managed_id -> unit
-(** Ensures that the specified managed domain is woken up.  This is for use with
-    {!idle} to ensure that the predicate given to {!idle} is checked and {!idle}
-    may return. *)
-
-val idle : until:('ready -> bool) -> 'ready -> unit
-(** Runs the current domain in a managed fashion [until] the given predicate
-    returns [true].  The caller must arrange for {!wakeup} to be called to
-    ensure that the predicate is checked to allow {!idle} to return.
-
-    The [until] predicate should ideally be as fast as possible, because it is
-    called repeatedly and it is also called during the period when the mutex of
-    the domain is locked before waiting on the condition variable of the domain
-    for a signal to wake up.
-
-    During the {!idle} call any {!scheduler}s may be spawned to run on the
-    domain. *)
-
-val next : managed_id -> managed_id
-(** Returns the next sibling of the given managed domain.  The siblings form a
-    cycle and the main domain is included in the cycle. *)
-
-val all : unit -> managed_id list
-(** Returns a list of all the managed domains.  This list also includes the main
-    domain as the first element. *)
 
 (** {1 Application level interface}
 
