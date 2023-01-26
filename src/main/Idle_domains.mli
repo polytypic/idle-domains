@@ -59,7 +59,7 @@ val all : unit -> managed_id list
     domain as the first element.
 
     The intended use case of {!all} is for libraries providing {!scheduler}s to
-    to perform per domain preparation once. *)
+    perform per domain preparation once. *)
 
 val self : unit -> managed_id
 (** An alias for [Domain.self ()] that asserts that is called from a managed
